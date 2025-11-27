@@ -190,6 +190,71 @@ def getShapeVertices(shape):
 
     return result
 
+# https://github.com/weecology/DeepForest/blob/ec1f8aafb833008718219f18a5b5fdb9fc35e171/deepforest/utilities.py#L111C5-L111C16
+def original_use_release_without_checking_latest_github_release(save_dir, prebuilt_model="NEON", check_release=True):
+    """
+    Check the existence of, or download the latest model release from github
+    Args:
+        save_dir: Directory to save filepath
+        prebuilt_model: Currently only accepts "NEON", but could be expanded to include other prebuilt models. The local model will be called prebuilt_model.h5 on disk.
+        check_release (logical): whether to check github for a model recent release. In cases where you are hitting the github API rate limit, set to False and any local model will be downloaded. If no model has been downloaded an error will raise.
+        
+    Returns: release_tag, output_path (str): path to downloaded model
+
+    """
+    import json, urllib
+    import pandas as pd
+    from deepforest.utilities import DownloadProgressBar
+    # Naming based on pre-built model
+    output_path = os.path.join(save_dir, prebuilt_model + ".pt")
+
+    if check_release:
+        # Find latest github tag release from the DeepLidar repo
+        _json = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    'https://api.github.com/repos/weecology/DeepForest/releases/44158489', # This line is patched to fix old behaviour
+                    headers={'Accept': 'application/vnd.github.v3+json'},
+                )).read())
+        asset = _json['assets'][0]
+        url = asset['browser_download_url']
+
+        # Check the release tagged locally
+        try:
+            release_txt = pd.read_csv(save_dir + "current_release.csv")
+        except BaseException:
+            release_txt = pd.DataFrame({"current_release": [None]})
+
+        # Download the current release it doesn't exist
+        if not release_txt.current_release[0] == _json["html_url"]:
+
+            print("Downloading model from DeepForest release {}, see {} for details".format(
+                _json["tag_name"], _json["html_url"]))
+
+            with DownloadProgressBar(unit='B',
+                                     unit_scale=True,
+                                     miniters=1,
+                                     desc=url.split('/')[-1]) as t:
+                urllib.request.urlretrieve(url, filename=output_path, reporthook=t.update_to)
+
+            print("Model was downloaded and saved to {}".format(output_path))
+
+            # record the release tag locally
+            release_txt = pd.DataFrame({"current_release": [_json["html_url"]]})
+            release_txt.to_csv(save_dir + "current_release.csv")
+        else:
+            print("Model from DeepForest release {} was already downloaded. "
+                  "Loading model from file.".format(_json["html_url"]))
+
+        return _json["html_url"], output_path
+    else:
+        try:
+            release_txt = pd.read_csv(save_dir + "current_release.csv")
+        except BaseException:
+            raise ValueError("Check release argument is {}, but no release has been previously downloaded".format(check_release))
+
+        return release_txt.current_release[0], output_path
+
 class DetectObjectsDlg(QtWidgets.QDialog):
 
     def __init__(self, parent):
@@ -335,17 +400,19 @@ class DetectObjectsDlg(QtWidgets.QDialog):
         import torch
         torch_hub_dir = torch.hub.get_dir()
 
+        import deepforest
         from deepforest import utilities
         if not hasattr(utilities, '__models_dir_path_already_patched__'):
             original_use_release = utilities.use_release
             original_use_bird_release = utilities.use_bird_release
-            # This is a workaround for Windows permission issues (we can't easily download files into .../site-packages/deepforest/...)
+            # 1) This is a workaround for Windows permission issues (we can't easily download files into .../site-packages/deepforest/...)
+            # 2) This is a workaround to fix error "deepforest/utilities.py line 133, asset = _json['assets'][0], IndexError: list index out of range" (patched version doesn't load the latest github release)
+            assert deepforest.__version__ == "1.2.4"
             def patched_use_release(**kwargs):
                 kwargs["save_dir"] = torch_hub_dir
-                return original_use_release(**kwargs)
+                return original_use_release_without_checking_latest_github_release(**kwargs)
             def patched_use_bird_release(**kwargs):
-                kwargs["save_dir"] = torch_hub_dir
-                return original_use_bird_release(**kwargs)
+                raise Exception("Birds pre-train is unsupported")
             utilities.use_release = patched_use_release
             utilities.use_bird_release = patched_use_bird_release
             utilities.__models_dir_path_already_patched__ = True
